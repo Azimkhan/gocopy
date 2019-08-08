@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"time"
 )
 
 var limit int
@@ -53,9 +54,51 @@ func Copy(src string, dest string, limit int, offset int) error {
 	}
 	defer destFile.Close()
 
-	_, copyErr := io.CopyN(destFile, srcFile, int64(limit))
+	p := make(chan int, 1)
+	go func() {
+		for i := range p {
+			fmt.Printf("Progress: %d\r", i)
+		}
+	}()
+	_, copyErr := CopyN(destFile, srcFile, int64(limit), p)
+	close(p)
+
 	if copyErr != nil {
 		return fmt.Errorf("copy error")
 	}
 	return nil
+}
+
+func CopyN(dst io.Writer, src io.Reader, n int64, p chan int) (written int64, err error) {
+	written, err = io.Copy(dst, &LimitedReaderWithProgress{src, n, p, 0})
+	if written == n {
+		return n, nil
+	}
+	if written < n && err == nil {
+		// src stopped early; must have been EOF.
+		err = io.EOF
+	}
+	return
+}
+
+type LimitedReaderWithProgress struct {
+	R    io.Reader // underlying reader
+	N    int64     // max bytes remaining
+	P    chan int
+	read int
+}
+
+func (l *LimitedReaderWithProgress) Read(p []byte) (n int, err error) {
+	time.Sleep(10 * time.Millisecond)
+	if l.N <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > l.N {
+		p = p[0:l.N]
+	}
+	n, err = l.R.Read(p)
+	l.N -= int64(n)
+	l.read += n
+	l.P <- l.read
+	return
 }
