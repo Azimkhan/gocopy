@@ -6,7 +6,7 @@ import (
 	"io"
 	"log"
 	"os"
-	"time"
+	"sync"
 )
 
 var limit int
@@ -23,7 +23,7 @@ func init() {
 }
 func main() {
 	flag.Parse()
-	fmt.Printf("%v %v %v %v\n", limit, offset, src, dest)
+	//fmt.Printf("%v %v %v %v\n", limit, offset, src, dest)
 	err := Copy(src, dest, limit, offset)
 	if err != nil {
 		log.Fatal(err)
@@ -31,74 +31,83 @@ func main() {
 }
 
 func Copy(src string, dest string, limit int, offset int) error {
+	var err error
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return fmt.Errorf("src file open error: %v", err)
 	}
 	defer srcFile.Close()
 
-	if limit <= 0 {
-		return fmt.Errorf("limit must be > 0")
-	}
-
+	// check offset
 	if offset > 0 {
-		_, seekErr := srcFile.Seek(int64(offset), io.SeekStart)
+		pos, seekErr := srcFile.Seek(int64(offset), io.SeekStart)
+		fmt.Println(pos)
 		if seekErr != nil {
 			return fmt.Errorf("seek error: %v", seekErr)
 		}
 	}
 
-	destFile, err2 := os.Create(dest)
-	if err2 != nil {
-		return fmt.Errorf("dest file open error: %v", err2)
+	destFile, err := os.Create(dest)
+	if err != nil {
+		return fmt.Errorf("dest file open error: %v", err)
 	}
 	defer destFile.Close()
 
 	p := make(chan int, 1)
-	go func() {
-		for i := range p {
-			fmt.Printf("Progress: %d\r", i)
-		}
-	}()
-	_, copyErr := CopyN(destFile, srcFile, int64(limit), p)
-	close(p)
 
-	if copyErr != nil {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func(pChan chan int) {
+		defer wg.Done()
+		for i := range pChan {
+			fmt.Printf("Bytes copied: %d\r", i)
+		}
+		fmt.Println("")
+	}(p)
+	_, err = CopyN(destFile, srcFile, int64(limit), p)
+	wg.Wait()
+
+	if err != nil {
 		return fmt.Errorf("copy error")
 	}
 	return nil
 }
 
-func CopyN(dst io.Writer, src io.Reader, n int64, p chan int) (written int64, err error) {
-	written, err = io.Copy(dst, &LimitedReaderWithProgress{src, n, p, 0})
-	if written == n {
-		return n, nil
+func CopyN(dst io.Writer, src io.Reader, limit int64, p chan int) (written int64, err error) {
+	if limit > 0 {
+		src = io.LimitReader(src, limit)
 	}
-	if written < n && err == nil {
+	written, err = io.Copy(dst, NewReaderWithProgress(src, p))
+	if written == limit {
+		return limit, nil
+	}
+	if written < limit && err == nil {
 		// src stopped early; must have been EOF.
 		err = io.EOF
 	}
 	return
 }
 
-type LimitedReaderWithProgress struct {
-	R    io.Reader // underlying reader
-	N    int64     // max bytes remaining
-	P    chan int
-	read int
+func NewReaderWithProgress(reader io.Reader, pChan chan int) io.Reader {
+	return &ReaderWithProgress{reader, pChan, 0}
 }
 
-func (l *LimitedReaderWithProgress) Read(p []byte) (n int, err error) {
-	time.Sleep(10 * time.Millisecond)
-	if l.N <= 0 {
-		return 0, io.EOF
-	}
-	if int64(len(p)) > l.N {
-		p = p[0:l.N]
-	}
+type ReaderWithProgress struct {
+	R         io.Reader
+	pChan     chan int
+	bytesRead int
+}
+
+func (l *ReaderWithProgress) Read(p []byte) (n int, err error) {
+	defer func() {
+		if n > 0 {
+			l.pChan <- l.bytesRead
+		}
+		if err == io.EOF {
+			close(l.pChan)
+		}
+	}()
 	n, err = l.R.Read(p)
-	l.N -= int64(n)
-	l.read += n
-	l.P <- l.read
+	l.bytesRead += n
 	return
 }
