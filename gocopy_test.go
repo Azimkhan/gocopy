@@ -16,7 +16,7 @@ func TestCopy(t *testing.T) {
 	assert.Equal(t, true, reflect.DeepEqual(shouldBe, read))
 
 	// === Copy with offset
-	copyErr = Copy("src", "dest", 2048, 3123123)
+	copyErr = Copy("src", "dest", 2048, 1024)
 	assert.NilError(t, copyErr)
 	read, _ = ioutil.ReadFile("dest")
 	shouldBe, _ = ioutil.ReadFile("r2")
